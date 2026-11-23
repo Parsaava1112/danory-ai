@@ -1,0 +1,125 @@
+name: Danory GPT v8 pretraining
+on:
+  workflow_dispatch:
+    inputs:
+      steps_this_run:
+        description: 'Optimizer steps for this job (start conservatively; 100 is a safe timing test)'
+        required: true
+        default: '100'
+        type: string
+      naab_train_rows:
+        description: 'Maximum NAAB train rows to stream'
+        required: true
+        default: '150000'
+        type: string
+      fineweb_rows:
+        description: 'Maximum FineWeb2-HQ Persian rows to stream'
+        required: true
+        default: '100000'
+        type: string
+      naab_train_shards:
+        description: 'Comma-separated NAAB train shard indexes (0-125)'
+        required: true
+        default: '0'
+        type: string
+      naab_test_shards:
+        description: 'NAAB test shard indexes (0-2)'
+        required: true
+        default: '2'
+        type: string
+      naab_val_rows:
+        description: 'Maximum NAAB test rows for validation'
+        required: true
+        default: '12000'
+        type: string
+      resume_run_id:
+        description: 'Numeric run ID containing danory-v8-pretrain artifact; blank for fresh run'
+        required: false
+        default: ''
+        type: string
+permissions:
+  contents: read
+  actions: read
+jobs:
+  pretrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+      - name: Restore prior checkpoint artifact
+        if: ${{ inputs.resume_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: danory-v8-pretrain
+          run-id: ${{ inputs.resume_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: resume_bundle
+      - name: Restore prepared corpus cache
+        uses: actions/cache@v4
+        with:
+          path: data/public
+          key: danory-v8-public-${{ inputs.naab_train_rows }}-${{ inputs.fineweb_rows }}-${{ inputs.naab_val_rows }}-${{ inputs.naab_train_shards }}-${{ inputs.naab_test_shards }}-${{ hashFiles('scripts/prepare_public_data.py') }}
+      - name: Prepare public Persian corpora
+        run: |
+          if [ ! -s data/public/train.jsonl ] || [ ! -s data/public/validation.jsonl ]; then
+            python scripts/prepare_public_data.py \
+              --naab-train-rows '${{ inputs.naab_train_rows }}' \
+              --fineweb-rows '${{ inputs.fineweb_rows }}' \
+              --naab-val-rows '${{ inputs.naab_val_rows }}' \
+              --naab-train-shards '${{ inputs.naab_train_shards }}' \
+              --naab-test-shards '${{ inputs.naab_test_shards }}'
+          else
+            echo 'Using cached public dataset files.'
+          fi
+      - name: Restore tokenizer and checkpoint
+        if: ${{ inputs.resume_run_id != '' }}
+        run: |
+          mkdir -p data/tokenizer checkpoints
+          cp resume_bundle/tokenizer/tokenizer.json data/tokenizer/
+          cp resume_bundle/tokenizer/tokenizer_report.json data/tokenizer/
+          cp resume_bundle/checkpoints/pretrain_last.pt checkpoints/
+          cp resume_bundle/checkpoints/pretrain_best.pt checkpoints/
+      - name: Build tokenizer on fresh run
+        if: ${{ inputs.resume_run_id == '' }}
+        run: python build_tokenizer.py --input data/public/train.jsonl --out data/tokenizer --vocab-size 24000 --max-chars 300000000
+      - name: Verify model and inputs
+        run: |
+          python scripts/model_info.py
+          python scripts/preflight.py
+          python -m compileall -q danory train.py generate.py scripts
+          python scripts/smoke_test.py
+      - name: Train or resume
+        run: |
+          if [ -f checkpoints/pretrain_last.pt ]; then
+            python train.py --config configs/pretrain.json --stage pretrain --resume checkpoints/pretrain_last.pt --steps-this-run '${{ inputs.steps_this_run }}'
+          else
+            python train.py --config configs/pretrain.json --stage pretrain --steps-this-run '${{ inputs.steps_this_run }}'
+          fi
+      - name: Prepare checkpoint artifact bundle
+        if: always()
+        run: |
+          mkdir -p artifact_bundle/checkpoints artifact_bundle/tokenizer artifact_bundle/configs
+          cp checkpoints/pretrain_last.pt artifact_bundle/checkpoints/ 2>/dev/null || true
+          cp checkpoints/pretrain_best.pt artifact_bundle/checkpoints/ 2>/dev/null || true
+          cp data/tokenizer/tokenizer.json artifact_bundle/tokenizer/ 2>/dev/null || true
+          cp data/tokenizer/tokenizer_report.json artifact_bundle/tokenizer/ 2>/dev/null || true
+          cp configs/model.json artifact_bundle/configs/ 2>/dev/null || true
+          cp logs/pretrain.csv artifact_bundle/ 2>/dev/null || true
+          cp data/public/data_manifest.json artifact_bundle/ 2>/dev/null || true
+      - name: Upload both checkpoints and tokenizer
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: danory-v8-pretrain
+          path: artifact_bundle/
+          if-no-files-found: warn
+          retention-days: 30

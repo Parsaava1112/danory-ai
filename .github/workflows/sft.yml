@@ -29,6 +29,11 @@ env:
   HF_HUB_DOWNLOAD_TIMEOUT: '120'
   HF_HUB_ETAG_TIMEOUT: '30'
   HF_DATASETS_DOWNLOAD_TIMEOUT: '120'
+  TOKENIZERS_PARALLELISM: 'false'
+  OMP_NUM_THREADS: '1'
+  MKL_NUM_THREADS: '1'
+  OPENBLAS_NUM_THREADS: '1'
+  NUMEXPR_NUM_THREADS: '1'
 
 jobs:
   sft:
@@ -62,14 +67,13 @@ jobs:
         run: |
           mkdir -p data/tokenizer checkpoints
 
-          cp pretrain_bundle/tokenizer/tokenizer.json \
-            data/tokenizer/
+          cp pretrain_bundle/tokenizer/tokenizer.json data/tokenizer/
 
-          cp pretrain_bundle/tokenizer/tokenizer_report.json \
-            data/tokenizer/
+          if [ -f pretrain_bundle/tokenizer/tokenizer_report.json ]; then
+            cp pretrain_bundle/tokenizer/tokenizer_report.json data/tokenizer/
+          fi
 
-          cp pretrain_bundle/checkpoints/pretrain_best.pt \
-            checkpoints/
+          cp pretrain_bundle/checkpoints/pretrain_best.pt checkpoints/
 
       - name: Prepare SFT dataset
         run: |
@@ -79,6 +83,72 @@ jobs:
             --naab-val-rows 0 \
             --include-sft \
             --sft-rows 20000
+
+      - name: Validate SFT data files
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          base = Path("data/public")
+          train = base / "sft.jsonl"
+          val = base / "sft_validation.jsonl"
+          manifest = base / "data_manifest.json"
+
+          for p in (train, val, manifest):
+              if not p.is_file():
+                  raise SystemExit(f"Missing required output: {p}")
+
+          def count_and_check(path):
+              count = 0
+
+              with path.open(encoding="utf-8") as f:
+                  for line_no, line in enumerate(f, 1):
+                      if not line.strip():
+                          continue
+
+                      try:
+                          row = json.loads(line)
+                      except Exception as e:
+                          raise SystemExit(
+                              f"Invalid JSON at {path}:{line_no}: {e}"
+                          )
+
+                      if not isinstance(row, dict) or not row.get("messages"):
+                          raise SystemExit(
+                              f"Invalid record at {path}:{line_no}"
+                          )
+
+                      count += 1
+
+              return count
+
+          train_count = count_and_check(train)
+          val_count = count_and_check(val)
+
+          data = json.loads(
+              manifest.read_text(encoding="utf-8")
+          )
+
+          if train_count < 1:
+              raise SystemExit("SFT training file is empty")
+
+          if val_count < 1:
+              raise SystemExit("SFT validation file is empty")
+
+          if train_count + val_count < 1000:
+              raise SystemExit("Unexpectedly small SFT dataset")
+
+          print(
+              f"Validated SFT records: "
+              f"train={train_count}, validation={val_count}"
+          )
+
+          print(
+              "Manifest SFT rows:",
+              data.get("sft_rows_written")
+          )
+          PY
 
       - name: Restore prior SFT checkpoint
         if: ${{ inputs.resume_run_id != '' }}
@@ -92,11 +162,11 @@ jobs:
       - name: Copy SFT resume checkpoint
         if: ${{ inputs.resume_run_id != '' }}
         run: |
-          cp sft_resume/checkpoints/sft_last.pt \
-            checkpoints/
+          cp sft_resume/checkpoints/sft_last.pt checkpoints/
 
-          cp sft_resume/checkpoints/sft_best.pt \
-            checkpoints/
+          if [ -f sft_resume/checkpoints/sft_best.pt ]; then
+            cp sft_resume/checkpoints/sft_best.pt checkpoints/
+          fi
 
       - name: Validate setup
         run: |
@@ -122,29 +192,19 @@ jobs:
       - name: Prepare SFT artifact
         if: always()
         run: |
-          mkdir -p artifact_bundle/checkpoints
-          mkdir -p artifact_bundle/tokenizer
+          mkdir -p artifact_bundle/checkpoints artifact_bundle/tokenizer
 
-          cp checkpoints/sft_last.pt \
-            artifact_bundle/checkpoints/ 2>/dev/null || true
+          cp checkpoints/sft_last.pt artifact_bundle/checkpoints/ 2>/dev/null || true
+          cp checkpoints/sft_best.pt artifact_bundle/checkpoints/ 2>/dev/null || true
 
-          cp checkpoints/sft_best.pt \
-            artifact_bundle/checkpoints/ 2>/dev/null || true
+          cp data/tokenizer/tokenizer.json artifact_bundle/tokenizer/ 2>/dev/null || true
+          cp data/tokenizer/tokenizer_report.json artifact_bundle/tokenizer/ 2>/dev/null || true
 
-          cp data/tokenizer/tokenizer.json \
-            artifact_bundle/tokenizer/ 2>/dev/null || true
+          cp logs/sft.csv artifact_bundle/ 2>/dev/null || true
 
-          cp logs/sft.csv \
-            artifact_bundle/ 2>/dev/null || true
-
-          cp data/public/sft.jsonl \
-            artifact_bundle/ 2>/dev/null || true
-
-          cp data/public/sft_validation.jsonl \
-            artifact_bundle/ 2>/dev/null || true
-
-          cp data/public/data_manifest.json \
-            artifact_bundle/ 2>/dev/null || true
+          cp data/public/sft.jsonl artifact_bundle/ 2>/dev/null || true
+          cp data/public/sft_validation.jsonl artifact_bundle/ 2>/dev/null || true
+          cp data/public/data_manifest.json artifact_bundle/ 2>/dev/null || true
 
       - name: Upload SFT checkpoints
         if: always()

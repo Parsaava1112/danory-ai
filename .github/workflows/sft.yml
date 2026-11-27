@@ -1,4 +1,5 @@
 name: Danory GPT v8 instruction tuning
+
 on:
   workflow_dispatch:
     inputs:
@@ -6,34 +7,49 @@ on:
         description: 'Numeric run ID with danory-v8-pretrain artifact'
         required: true
         type: string
+
       steps_this_run:
         description: 'SFT optimizer steps in this job'
         required: true
         default: '100'
         type: string
+
       resume_run_id:
         description: 'Numeric previous SFT run ID; blank to initialize from pretraining'
         required: false
         default: ''
         type: string
+
 permissions:
   contents: read
   actions: read
+
+env:
+  HF_HUB_DISABLE_XET: '1'
+  HF_HUB_DOWNLOAD_TIMEOUT: '120'
+  HF_HUB_ETAG_TIMEOUT: '30'
+  HF_DATASETS_DOWNLOAD_TIMEOUT: '120'
+
 jobs:
   sft:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
+
       - name: Download pretraining artifact
         uses: actions/download-artifact@v4
         with:
@@ -41,15 +57,29 @@ jobs:
           run-id: ${{ inputs.pretrain_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: pretrain_bundle
+
       - name: Restore tokenizer and pretrained weights
         run: |
           mkdir -p data/tokenizer checkpoints
-          cp pretrain_bundle/tokenizer/tokenizer.json data/tokenizer/
-          cp pretrain_bundle/tokenizer/tokenizer_report.json data/tokenizer/
-          cp pretrain_bundle/checkpoints/pretrain_best.pt checkpoints/
+
+          cp pretrain_bundle/tokenizer/tokenizer.json \
+            data/tokenizer/
+
+          cp pretrain_bundle/tokenizer/tokenizer_report.json \
+            data/tokenizer/
+
+          cp pretrain_bundle/checkpoints/pretrain_best.pt \
+            checkpoints/
+
       - name: Prepare SFT dataset
         run: |
-          python scripts/prepare_public_data.py --naab-train-rows 0 --fineweb-rows 0 --naab-val-rows 0 --include-sft --sft-rows 20000
+          python scripts/prepare_public_data.py \
+            --naab-train-rows 0 \
+            --fineweb-rows 0 \
+            --naab-val-rows 0 \
+            --include-sft \
+            --sft-rows 20000
+
       - name: Restore prior SFT checkpoint
         if: ${{ inputs.resume_run_id != '' }}
         uses: actions/download-artifact@v4
@@ -58,30 +88,64 @@ jobs:
           run-id: ${{ inputs.resume_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: sft_resume
+
       - name: Copy SFT resume checkpoint
         if: ${{ inputs.resume_run_id != '' }}
         run: |
-          cp sft_resume/checkpoints/sft_last.pt checkpoints/
-          cp sft_resume/checkpoints/sft_best.pt checkpoints/
+          cp sft_resume/checkpoints/sft_last.pt \
+            checkpoints/
+
+          cp sft_resume/checkpoints/sft_best.pt \
+            checkpoints/
+
       - name: Validate setup
         run: |
           python scripts/model_info.py
           python -m compileall -q danory train.py generate.py scripts
+
       - name: Run SFT
         run: |
           if [ -f checkpoints/sft_last.pt ]; then
-            python train.py --config configs/sft.json --stage sft --resume checkpoints/sft_last.pt --steps-this-run '${{ inputs.steps_this_run }}'
+            python train.py \
+              --config configs/sft.json \
+              --stage sft \
+              --resume checkpoints/sft_last.pt \
+              --steps-this-run '${{ inputs.steps_this_run }}'
           else
-            python train.py --config configs/sft.json --stage sft --init-from checkpoints/pretrain_best.pt --steps-this-run '${{ inputs.steps_this_run }}'
+            python train.py \
+              --config configs/sft.json \
+              --stage sft \
+              --init-from checkpoints/pretrain_best.pt \
+              --steps-this-run '${{ inputs.steps_this_run }}'
           fi
+
       - name: Prepare SFT artifact
         if: always()
         run: |
-          mkdir -p artifact_bundle/checkpoints artifact_bundle/tokenizer
-          cp checkpoints/sft_last.pt artifact_bundle/checkpoints/ 2>/dev/null || true
-          cp checkpoints/sft_best.pt artifact_bundle/checkpoints/ 2>/dev/null || true
-          cp data/tokenizer/tokenizer.json artifact_bundle/tokenizer/ 2>/dev/null || true
-          cp logs/sft.csv artifact_bundle/ 2>/dev/null || true
+          mkdir -p artifact_bundle/checkpoints
+          mkdir -p artifact_bundle/tokenizer
+
+          cp checkpoints/sft_last.pt \
+            artifact_bundle/checkpoints/ 2>/dev/null || true
+
+          cp checkpoints/sft_best.pt \
+            artifact_bundle/checkpoints/ 2>/dev/null || true
+
+          cp data/tokenizer/tokenizer.json \
+            artifact_bundle/tokenizer/ 2>/dev/null || true
+
+          cp logs/sft.csv \
+            artifact_bundle/ 2>/dev/null || true
+
+          cp data/public/sft.jsonl \
+            artifact_bundle/ 2>/dev/null || true
+
+          cp data/public/sft_validation.jsonl \
+            artifact_bundle/ 2>/dev/null || true
+
+          cp data/public/data_manifest.json \
+            artifact_bundle/ 2>/dev/null || true
+
       - name: Upload SFT checkpoints
         if: always()
         uses: actions/upload-artifact@v4

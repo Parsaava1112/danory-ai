@@ -499,7 +499,7 @@ def main():
             shard_dir,
             ignore_errors=True
         )
-            sft_count = 0
+    sft_count = 0
     validation_count = 0
     sft_sources = {}
 

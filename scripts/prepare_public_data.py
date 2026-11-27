@@ -5,6 +5,12 @@ import os
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
 os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
+os.environ.setdefault("HF_DATASETS_DOWNLOAD_TIMEOUT", "120")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import argparse
 import hashlib
@@ -493,8 +499,7 @@ def main():
             shard_dir,
             ignore_errors=True
         )
-
-    sft_count = 0
+            sft_count = 0
     validation_count = 0
     sft_sources = {}
 
@@ -687,3 +692,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    # Hugging Face streaming + native Arrow extensions can occasionally crash
+    # during CPython finalization on CI (exit 134), after outputs are complete.
+    # All files are closed and output is flushed before this controlled exit.
+    import sys
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
